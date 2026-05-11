@@ -21,11 +21,14 @@ target_include_directories(wdl_resampler PUBLIC
         libs/WDL/WDL
 )
 target_compile_options(wdl_resampler PRIVATE -fsigned-char)
+target_compile_definitions(wdl_resampler PRIVATE WDL_RESAMPLE_TYPE=float)
 
 add_executable(ds5_dongle_linux
         src/USBGadget.cpp
         src/USBGadget.h
         src/main.cpp
+        src/DebugHIDInput.cpp
+        src/DebugHIDInput.h
         src/ALSARecord.cpp
         src/ALSARecord.h
         src/USBHID.cpp
@@ -36,8 +39,9 @@ add_executable(ds5_dongle_linux
         src/Utils.h)
 
 target_compile_options(ds5_dongle_linux PRIVATE -fsigned-char)
+target_compile_definitions(ds5_dongle_linux PRIVATE WDL_RESAMPLE_TYPE=float)
 
-set(OPUS_FIXED_POINT ON)
+# Match the Pico speaker path, which builds Opus in its default floating-point mode.
 set(OPUS_DISABLE_INTRINSICS ON)
 
 add_subdirectory(libs/opus)

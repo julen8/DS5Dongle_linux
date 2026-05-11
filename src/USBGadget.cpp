@@ -1,6 +1,8 @@
 #include <iostream>
 #include <fstream>
 #include <cerrno>
+#include <cstring>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string>
@@ -13,17 +15,26 @@
 namespace {
 constexpr const char* kAudioFunctionName = "uac2.gs0";
 constexpr const char* kHidFunctionName = "hid.usb0";
-constexpr const char* kAdbFunctionName = "ffs.adb";
+
+bool env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && std::string(value) != "0";
+}
 }
 
 bool USBGadget::write_file(const std::string& path, const std::string& value) {
     std::ofstream file(path);
     if (!file) {
+        std::cerr << "Failed to open " << path << " for write: " << strerror(errno) << std::endl;
         return false;
     }
 
     file << value;
-    return file.good();
+    if (!file.good()) {
+        std::cerr << "Failed to write " << path << " value " << value << std::endl;
+        return false;
+    }
+    return true;
 }
 
 bool USBGadget::make_dir(const std::string& path) {
@@ -57,13 +68,13 @@ USBGadget::USBGadget(const std::string& name)
 
 bool USBGadget::create() {
     if (geteuid() != 0) {
-        std::cerr << "需要 root 权限" << std::endl;
+        std::cerr << "Need root privileges" << std::endl;
         return false;
     }
 
     udc_name = find_udc();
     if (udc_name.empty()) {
-        std::cerr << "未找到 UDC 控制器" << std::endl;
+        std::cerr << "UDC controller not found" << std::endl;
         return false;
     }
 
@@ -93,23 +104,32 @@ bool USBGadget::create() {
         return false;
     }
 
-    // 创建 UAC
     const std::string uac_func = gadget_root + "/functions/" + kAudioFunctionName;
     if (!make_dir(uac_func) ||
         !write_file(uac_func + "/c_chmask", "0x33") ||
         !write_file(uac_func + "/c_ssize", "2") ||
         !write_file(uac_func + "/c_srate", "48000") ||
+        !write_file(uac_func + "/p_chmask", "0x1") ||
+        !write_file(uac_func + "/p_ssize", "2") ||
+        !write_file(uac_func + "/p_srate", "48000") ||
+        !write_file(uac_func + "/p_volume_min", "256") ||
+        !write_file(uac_func + "/p_volume_max", "512") ||
+        !write_file(uac_func + "/p_volume_res", "256")) {
+        return false;
+    }
+
+    if (std::filesystem::exists(uac_func + "/function_name") &&
         !write_file(uac_func + "/function_name", "DualSense Wireless Controller")) {
         return false;
     }
 
-    // 创建 HID
     const std::string hid_func = gadget_root + "/functions/" + kHidFunctionName;
+    const bool no_out_endpoint = env_enabled("DS5_HID_NO_OUT_ENDPOINT");
     if (!make_dir(hid_func) ||
         !write_file(hid_func + "/protocol", "0") ||
         !write_file(hid_func + "/subclass", "0") ||
         !write_file(hid_func + "/report_length", "64") ||
-        !write_file(hid_func + "/no_out_endpoint","1")) { // INTERRUPT OUT fallback to SET_REPORT
+        !write_file(hid_func + "/no_out_endpoint", no_out_endpoint ? "1" : "0")) {
         return false;
     }
 
@@ -124,31 +144,19 @@ bool USBGadget::create() {
     }
     report.close();
 
-    // 创建 ADB
-    const std::string adb_func = gadget_root + "/functions/" + kAdbFunctionName;
-    if (!make_dir(adb_func) ||
-        !make_dir("/dev/usb-ffs/") ||
-        !make_dir("/dev/usb-ffs/adb")) {
-        return false;
-    }
-
-    // 有点危险，后面看看有没有办法解决
-    system("mount -t functionfs adb /dev/usb-ffs/adb");
-    system("adbd &");
-
     if (symlink(hid_func.c_str(), (gadget_root + "/configs/c.1/" + kHidFunctionName).c_str()) != 0 ||
-        symlink(uac_func.c_str(), (gadget_root + "/configs/c.1/" + kAudioFunctionName).c_str()) != 0 ||
-        symlink(adb_func.c_str(), (gadget_root + "/configs/c.1/" + kAdbFunctionName).c_str()) != 0) {
+        symlink(uac_func.c_str(), (gadget_root + "/configs/c.1/" + kAudioFunctionName).c_str()) != 0) {
         return false;
     }
 
-    sleep(1); // wait for adbd started
+    sleep(1);
 
     if (!write_file(gadget_root + "/UDC", udc_name)) {
+        destroy();
         return false;
     }
 
-    std::cout << "复合设备创建完成：UAC2 + HID" << std::endl;
+    std::cout << "Composite gadget created: UAC2 + HID" << std::endl;
     return true;
 }
 
@@ -159,15 +167,11 @@ void USBGadget::destroy() {
         write_file(udc_path, "");
     }
 
-    // TODO 工厂化设计
-
     unlink((gadget_root + "/configs/c.1/" + kHidFunctionName).c_str());
     unlink((gadget_root + "/configs/c.1/" + kAudioFunctionName).c_str());
-    unlink((gadget_root + "/configs/c.1/" + kAdbFunctionName).c_str());
 
     remove_dir(gadget_root + "/functions/" + kHidFunctionName);
     remove_dir(gadget_root + "/functions/" + kAudioFunctionName);
-    remove_dir(gadget_root + "/functions/" + kAdbFunctionName);
     remove_dir(gadget_root + "/configs/c.1");
     remove_dir(gadget_root + "/strings/0x409");
     remove_dir(gadget_root);
@@ -175,6 +179,10 @@ void USBGadget::destroy() {
 
 bool USBGadget::exists() const {
     if (std::filesystem::exists(gadget_root)) {
+        if (!std::filesystem::exists(gadget_root + "/configs/c.1/" + kAudioFunctionName)) {
+            return false;
+        }
+
         std::ifstream file(gadget_root + "/UDC");
         if (!file.is_open()) {
             return false;
@@ -189,16 +197,3 @@ bool USBGadget::exists() const {
 
     return false;
 }
-
-/*int main() {
-    USBGadget gadget;
-    if (!gadget.create()) {
-        std::cerr << "创建失败" << std::endl;
-        return 1;
-    }
-
-    std::cout << "按 Enter 键销毁设备..." << std::endl;
-    std::cin.get();
-    gadget.destroy();
-    return 0;
-}*/
