@@ -5,6 +5,7 @@
 #ifndef DS5_DONGLE_LINUX_ALSARECORD_H
 #define DS5_DONGLE_LINUX_ALSARECORD_H
 #include <atomic>
+#include <string>
 #include <alsa/asoundlib.h>
 
 #include "BTHID.h"
@@ -27,6 +28,7 @@ private:
     void mic_keepalive_proc();
     void speaker_proc(int16_t* data,ssize_t frames);
     void waveout_proc();
+    std::string find_uac_capture_device();
 public:
     int init();
     // return: read frames

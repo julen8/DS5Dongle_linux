@@ -118,7 +118,8 @@ MixerValue read_haptics_volume() {
 }
 
 int ALSARecord::init() {
-    int ret = snd_pcm_open(&handle, "hw:0,0", SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+    const auto snd_name = find_uac_capture_device();
+    int ret = snd_pcm_open(&handle, snd_name.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
     if (ret < 0) {
         std::cerr << "Failed to open PCM device: " << snd_strerror(ret) << std::endl;
         return ret;
@@ -545,4 +546,28 @@ void ALSARecord::speaker_proc(int16_t* data, ssize_t frames) {
         log_packets = 0;
         last_log = now;
     }
+}
+
+std::string ALSARecord::find_uac_capture_device() {
+    int card = -1;
+    while (snd_card_next(&card) >= 0 && card >= 0) {
+        char *name = nullptr;
+        if (snd_card_get_name(card, &name) >= 0 && name) {
+            std::string card_name(name);
+            free(name);
+            printf("snd card name:%s\n", card_name.c_str());
+            if (card_name.find("UAC2") != std::string::npos ||
+                card_name.find("Gadget") != std::string::npos ||
+                card_name.find("gadget") != std::string::npos ||
+                card_name.find("USB") != std::string::npos) {
+                char device[32];
+                snprintf(device, sizeof(device), "hw:%d,0", card);
+                printf("[Audio] Found UAC gadget ALSA device: %s (%s)\n", device, card_name.c_str());
+                return std::string(device);
+                }
+        }
+    }
+
+    printf("[Audio] No UAC gadget card found, trying hw:0,0\n");
+    return "hw:0,0";
 }
