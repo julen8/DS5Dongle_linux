@@ -2,3 +2,5 @@
 .clion.source.upload.marker
 /alsa-static/
 /bin/
+/build_arm64/
+compile_commands.json

@@ -2,24 +2,23 @@
 // Created by awalol on 2026/3/29.
 //
 
-#include "USBGadget.h"
-#include "BTHID.h"
-#include "DebugHIDInput.h"
-#include "USBHID.h"
-#include "ALSARecord.h"
-
-#include <cstring>
-#include <chrono>
-#include <cerrno>
-#include <cstdio>
-#include <cstdlib>
-#include <iostream>
-#include <array>
-#include <atomic>
-#include <thread>
 #include <sys/epoll.h>
 #include <unistd.h>
 
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <thread>
+
+#include "ALSARecord.h"
+#include "BTHID.h"
+#include "DebugHIDInput.h"
+#include "USBGadget.h"
+#include "USBHID.h"
 #include "Utils.h"
 
 USBGadget gadget;
@@ -27,15 +26,6 @@ BTHID bt;
 DebugHIDInput debugInput;
 USBHID usb;
 ALSARecord recorder(bt);
-std::atomic<uint8_t> pendingWaveOutRoute = 0x13;
-bool featureWaveOutActive = false;
-uint8_t featureWaveOutRoute = 0x13;
-bool inferredWaveOutActive = false;
-uint8_t inferredWaveOutRoute = 0x13;
-std::atomic<uint8_t> hostAudioRoute = 0x13;
-std::chrono::steady_clock::time_point inferredWaveOutDeadline;
-
-constexpr auto kInferredWaveOutHold = std::chrono::seconds(30);
 
 bool find_bt_report31(const uint8_t* data, size_t size, size_t& offset) {
     if (size >= 78 && data[0] == 0x31) {
@@ -64,9 +54,7 @@ bool is_mic_input_report(const uint8_t* data, size_t size) {
     return is_mic_input_report(data, size, payloadOffset);
 }
 
-bool is_mic_input_report(const std::vector<std::uint8_t>& data) {
-    return is_mic_input_report(data.data(), data.size());
-}
+bool is_mic_input_report(const std::vector<std::uint8_t>& data) { return is_mic_input_report(data.data(), data.size()); }
 
 bool is_full_bt_input_report(const uint8_t* data, size_t size) {
     size_t reportOffset = 0;
@@ -77,26 +65,16 @@ bool is_full_bt_input_report(const uint8_t* data, size_t size) {
     return (data[reportOffset + 1] & 0x01) != 0;
 }
 
-uint8_t interrupt_data[64] = {
-    0x01, 0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7,
-    0x08, 0x00, 0x00, 0x00, 0x52, 0x43, 0x30, 0x41,
-    0x01, 0x00, 0x0e, 0x00, 0xef, 0xff, 0x03, 0x03,
-    0x7b, 0x1b, 0x18, 0xf0, 0xcc, 0x9c, 0x60, 0x00,
-    0xfc, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
-    0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0xa7, 0xad, 0x60, 0x00, 0x29, 0x18, 0x00,
-    0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b
-};
+uint8_t interrupt_data[64] = {0x01, 0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7, 0x08, 0x00, 0x00, 0x00, 0x52, 0x43, 0x30, 0x41,
+                              0x01, 0x00, 0x0e, 0x00, 0xef, 0xff, 0x03, 0x03, 0x7b, 0x1b, 0x18, 0xf0, 0xcc, 0x9c, 0x60, 0x00,
+                              0xfc, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00,
+                              0x00, 0xa7, 0xad, 0x60, 0x00, 0x29, 0x18, 0x00, 0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b};
 
 void log_usb_input_controls();
 
-bool headset_connected_from_status(uint8_t status) {
-    return (status & 0x01) != 0;
-}
+bool headset_connected_from_status(uint8_t status) { return (status & 0x01) != 0; }
 
-bool mic_button_pressed_from_usb_report(const uint8_t* data, size_t size) {
-    return size > 10 && (data[10] & 0x04) != 0;
-}
+bool mic_button_pressed_from_usb_report(const uint8_t* data, size_t size) { return size > 10 && (data[10] & 0x04) != 0; }
 
 bool mic_button_pressed_from_bt_report31(const uint8_t* data, size_t size) {
     if (size >= 12 && data[0] == 0x31) {
@@ -149,122 +127,6 @@ void forward_usb_feature_report(uint8_t reportId, const uint8_t* payload, size_t
     }
 }
 
-void apply_waveout_state() {
-    const bool enabled = featureWaveOutActive || inferredWaveOutActive;
-    const uint8_t route = featureWaveOutActive
-        ? featureWaveOutRoute
-        : (inferredWaveOutActive ? inferredWaveOutRoute : hostAudioRoute.load(std::memory_order_relaxed));
-    recorder.setWaveOut(enabled, route);
-    bt.setAudioRouteOverride(route);
-}
-
-void set_inferred_waveout(bool enabled, uint8_t route, const char* reason,
-                          uint8_t headphoneVolume, uint8_t speakerVolume, uint8_t audioControl) {
-    const auto now = std::chrono::steady_clock::now();
-    if (enabled) {
-        inferredWaveOutDeadline = now + kInferredWaveOutHold;
-        const bool changed = !inferredWaveOutActive || inferredWaveOutRoute != route;
-        inferredWaveOutActive = true;
-        inferredWaveOutRoute = route;
-        apply_waveout_state();
-        if (changed) {
-            std::cout << "USB WAVEOUT inferred on route=0x" << std::hex
-                      << static_cast<int>(route)
-                      << " hp=0x" << static_cast<int>(headphoneVolume)
-                      << " sp=0x" << static_cast<int>(speakerVolume)
-                      << " audio=0x" << static_cast<int>(audioControl)
-                      << " reason=" << reason
-                      << std::dec << std::endl;
-        }
-        return;
-    }
-
-    if (!inferredWaveOutActive) {
-        return;
-    }
-    inferredWaveOutActive = false;
-    apply_waveout_state();
-    std::cout << "USB WAVEOUT inferred off reason=" << reason << std::endl;
-}
-
-void poll_inferred_waveout() {
-    if (!inferredWaveOutActive) {
-        return;
-    }
-
-    if (std::chrono::steady_clock::now() >= inferredWaveOutDeadline) {
-        set_inferred_waveout(false, inferredWaveOutRoute, "timeout", 0, 0, 0);
-    }
-}
-
-void handle_usb_output_report(const uint8_t* payload, size_t size) {
-    if (!payload || size < 8) {
-        return;
-    }
-
-    const uint8_t validFlag0 = payload[0];
-    const uint8_t headphoneVolume = payload[4];
-    const uint8_t speakerVolume = payload[5];
-    const uint8_t audioControl = payload[7];
-    const bool audioTouched = (validFlag0 & ((1 << 4) | (1 << 5) | (1 << 7))) != 0;
-    const bool headphoneWave = headphoneVolume == 0x41 && speakerVolume == 0x00;
-    const bool speakerWave = speakerVolume == 0x55 && headphoneVolume == 0x00;
-
-    if (audioControl == 0x30 || (speakerVolume > 0 && headphoneVolume == 0)) {
-        hostAudioRoute.store(0x13, std::memory_order_relaxed);
-    } else if (headphoneVolume > 0 && speakerVolume == 0) {
-        hostAudioRoute.store(0x16, std::memory_order_relaxed);
-    }
-
-    if (headphoneWave) {
-        set_inferred_waveout(true, 0x16, "output-report", headphoneVolume, speakerVolume, audioControl);
-        return;
-    }
-    if (speakerWave) {
-        set_inferred_waveout(true, 0x13, "output-report", headphoneVolume, speakerVolume, audioControl);
-        return;
-    }
-    if (audioTouched) {
-        apply_waveout_state();
-        set_inferred_waveout(false, inferredWaveOutRoute, "audio-output-change",
-                             headphoneVolume, speakerVolume, audioControl);
-    }
-}
-
-void handle_usb_test_command(const uint8_t* payload, size_t size) {
-    if (!payload || size < 2 || payload[0] != 0x06) {
-        return;
-    }
-
-    if (payload[1] == 0x04 && size >= 9) {
-        uint8_t route = 0;
-        if (payload[4] == 0x08) {
-            route = 0x13;
-        } else if (payload[6] == 0x04 && payload[8] == 0x06) {
-            route = 0x16;
-        }
-
-        if (route != 0) {
-            pendingWaveOutRoute.store(route, std::memory_order_relaxed);
-            bt.setAudioRouteOverride(route);
-            std::cout << "USB WAVEOUT prepare route=0x" << std::hex
-                      << static_cast<int>(route) << std::dec << std::endl;
-        }
-        return;
-    }
-
-    if (payload[1] == 0x02 && size >= 5) {
-        const bool enabled = payload[2] != 0;
-        const uint8_t route = pendingWaveOutRoute.load(std::memory_order_relaxed);
-        featureWaveOutActive = enabled;
-        featureWaveOutRoute = route;
-        apply_waveout_state();
-        std::cout << "USB WAVEOUT " << (enabled ? "on" : "off")
-                  << " route=0x" << std::hex << static_cast<int>(route)
-                  << std::dec << std::endl;
-    }
-}
-
 void apply_short_input_report(const std::vector<std::uint8_t>& data) {
     if (data.size() != 10 || data[0] != 0x01) {
         return;
@@ -307,15 +169,14 @@ void log_bt_report_shape(const std::vector<std::uint8_t>& data) {
     std::cout << "BT REPORT len=" << data.size();
     if (find_bt_report31(data.data(), data.size(), reportOffset)) {
         std::cout << " flags=0x" << std::hex << static_cast<int>(data[reportOffset + 1])
-                  << " mic=" << ((data[reportOffset + 1] & 0x02) ? 1 : 0)
-                  << " input=" << ((data[reportOffset + 1] & 0x01) ? 1 : 0)
+                  << " mic=" << ((data[reportOffset + 1] & 0x02) ? 1 : 0) << " input=" << ((data[reportOffset + 1] & 0x01) ? 1 : 0)
                   << std::dec;
     }
     std::cout << std::endl;
     logCount++;
 }
 
-void audio_task(const std::stop_token &stop_token) {
+void audio_task(const std::stop_token& stop_token) {
     while (!stop_token.stop_requested()) {
         recorder.audio_loop();
     }
@@ -366,19 +227,15 @@ int event_bus() {
             return 6;
         }
 
-        if (debugInput.available() && debugInput.drain(
-                interrupt_data,
-                sizeof(interrupt_data),
-                [](const uint8_t* data, size_t size) {
-                    recorder.mic_add_packet(data, size);
-                })) {
+        if (debugInput.available() && debugInput.drain(interrupt_data, sizeof(interrupt_data),
+                                                       [](const uint8_t* data, size_t size) { recorder.mic_add_packet(data, size); })) {
             bt.setHeadset(headset_connected_from_status(interrupt_data[54]));
             bt.handleMicButton(mic_button_pressed_from_usb_report(interrupt_data, sizeof(interrupt_data)));
             log_usb_input_controls();
         }
 
         auto now = std::chrono::steady_clock::now();
-        poll_inferred_waveout();
+
         if (now >= nextSendTime) {
             sync_usb_mic_mute_status();
             usb.send(interrupt_data, 64);
@@ -423,37 +280,35 @@ int event_bus() {
                 log_usb_raw(data);
                 if (data.size() == 47) {
                     bt.setStateData(data.data(), data.size());
-                    handle_usb_output_report(data.data(), data.size());
+
                     continue;
                 }
                 if (data.size() == 63 && data[0] == 0x06) {
-                    handle_usb_test_command(data.data(), data.size());
                     forward_usb_feature_report(0x80, data.data(), data.size());
                     continue;
                 }
                 if (hid_no_out_endpoint_enabled()) {
                     if (data.size() == 47) {
                         bt.setStateData(data.data(), data.size());
-                        handle_usb_output_report(data.data(), data.size());
+
                         continue;
                     }
                     if (data.size() == 63) {
-                        handle_usb_test_command(data.data(), data.size());
                         forward_usb_feature_report(0x80, data.data(), data.size());
                         continue;
                     }
                 }
                 if (data[0] == 0x02) {
                     bt.setStateData(data.data() + 1, data.size() - 1);
-                    handle_usb_output_report(data.data() + 1, data.size() - 1);
+
                     continue;
                 }
                 if (data[0] == 0x80) {
                     data.resize(64);
-                    handle_usb_test_command(data.data() + 1, data.size() - 1);
+
                     forward_usb_feature_report(0x80, data.data() + 1, data.size() - 1);
                 }
-            }else if (events[i].data.fd == bt.get_fd()) {
+            } else if (events[i].data.fd == bt.get_fd()) {
                 // 接收蓝牙的状态数据
                 std::vector<std::uint8_t> data = bt.recv();
                 if (data.empty()) {
@@ -501,7 +356,7 @@ int event_bus() {
                     haveLastBtControls = true;
                 }
                 bt.setHeadset(headset_connected_from_status(data[55]));
-                memcpy(interrupt_data + 1,data.data() + 2,63);
+                memcpy(interrupt_data + 1, data.data() + 2, 63);
                 sync_usb_mic_mute_status();
             }
         }
@@ -539,23 +394,23 @@ int main() {
     auto ret = bt.sendInitialState();
 
     std::cout << "Get Controller and Host MAC" << std::endl;
-    auto report_0x09 = bt.get_feature_report(0x09,20);
-    ret = usb.set_get_report(0x09,report_0x09);
+    auto report_0x09 = bt.get_feature_report(0x09, 20);
+    ret = usb.set_get_report(0x09, report_0x09);
     Utils::print_hex(report_0x09);
 
     std::cout << "Get Controller Version/Data (Firmware Info)" << std::endl;
-    auto report_0x20 = bt.get_feature_report(0x20,64);
-    ret = usb.set_get_report(0x20,report_0x20);
+    auto report_0x20 = bt.get_feature_report(0x20, 64);
+    ret = usb.set_get_report(0x20, report_0x20);
     Utils::print_hex(report_0x20);
 
     std::cout << "Get Hardware Info" << std::endl;
-    auto report_0x22 = bt.get_feature_report(0x22,64);
-    ret = usb.set_get_report(0x22,report_0x22);
+    auto report_0x22 = bt.get_feature_report(0x22, 64);
+    ret = usb.set_get_report(0x22, report_0x22);
     Utils::print_hex(report_0x22);
 
     std::cout << "Get Calibration" << std::endl;
-    auto report_0x05 = bt.get_feature_report(0x05,41);
-    ret = usb.set_get_report(0x05,report_0x05);
+    auto report_0x05 = bt.get_feature_report(0x05, 41);
+    ret = usb.set_get_report(0x05, report_0x05);
     Utils::print_hex(report_0x05);
 
     auto thread2 = std::jthread(audio_task);

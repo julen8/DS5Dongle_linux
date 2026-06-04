@@ -31,11 +31,6 @@ bool is_transient_errno(int error) {
     return error == EAGAIN || error == EWOULDBLOCK || error == EINTR;
 }
 
-uint64_t now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
 bool mic_experiment_enabled() {
     const char* value = std::getenv("DS5_ENABLE_BT_MIC");
     return value && std::string(value) != "0";
@@ -153,14 +148,6 @@ ssize_t BTHID::send(uint8_t *data, size_t size) const {
     return ret;
 }
 
-void BTHID::markAudioActive() {
-    audioActiveUntilMs.store(now_ms() + 100, std::memory_order_relaxed);
-}
-
-bool BTHID::audioActive() const {
-    return now_ms() < audioActiveUntilMs.load(std::memory_order_relaxed);
-}
-
 std::vector<std::uint8_t> BTHID::recv() const {
     std::vector<std::uint8_t> data(128);
     const long ret = read(fd, data.data(), data.size());
@@ -188,10 +175,6 @@ void BTHID::setStateData(const uint8_t* data, size_t size) {
     memcpy(stateData.data(), data, stateSize);
     applyUsbOutputReport(data, size);
     normalizeAudioStateLocked();
-
-    if (audioActive()) {
-        return;
-    }
 
     sendStateReportLocked();
 }

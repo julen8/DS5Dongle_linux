@@ -58,8 +58,7 @@ public:
     void applyUsbAudioFeatureReport(const uint8_t* data, size_t size);
     void applyUsbOutputReport(const uint8_t* data, size_t size);
     void setAudioRouteOverride(uint8_t route);
-    void markAudioActive();
-    bool audioActive() const;
+
     ssize_t sendInitialState();
     ssize_t send(uint8_t* data, size_t size) const;
     std::vector<std::uint8_t> recv() const;
