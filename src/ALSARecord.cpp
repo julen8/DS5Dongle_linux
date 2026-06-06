@@ -13,135 +13,85 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <mutex>
 #include <thread>
 
 #include "Utils.h"
+#include "audio.h"
+#include "config.h"
+#include "defer.h"
+#include "log.h"
 #include "resample.h"
 
-namespace {
-constexpr int kMicOpusSize = 71;
-constexpr int kMicFrames = 480;
 constexpr int kMicChannels = 1;
 
-uint8_t speaker_data[200];
-
-struct MixerValue {
-    bool ok = false;
-    long value = 0;
-    long min = 0;
-    long max = 0;
-    const char* name = "";
-};
-
-MixerValue read_mixer_value(const char* name) {
-    MixerValue result;
-    result.name = name;
-
-    snd_ctl_t* ctl = nullptr;
-    if (snd_ctl_open(&ctl, "hw:0", 0) < 0) {
-        return result;
-    }
-
-    snd_ctl_elem_id_t* id;
-    snd_ctl_elem_info_t* info;
-    snd_ctl_elem_value_t* value;
-    snd_ctl_elem_id_alloca(&id);
-    snd_ctl_elem_info_alloca(&info);
-    snd_ctl_elem_value_alloca(&value);
-
-    snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
-    snd_ctl_elem_id_set_name(id, name);
-    snd_ctl_elem_info_set_id(info, id);
-
-    if (snd_ctl_elem_info(ctl, info) >= 0 && snd_ctl_elem_info_get_type(info) == SND_CTL_ELEM_TYPE_INTEGER &&
-        snd_ctl_elem_info_get_count(info) > 0) {
-        snd_ctl_elem_value_set_id(value, id);
-        if (snd_ctl_elem_read(ctl, value) >= 0) {
-            result.ok = true;
-            result.value = snd_ctl_elem_value_get_integer(value, 0);
-            result.min = snd_ctl_elem_info_get_min(info);
-            result.max = snd_ctl_elem_info_get_max(info);
-        }
-    }
-
-    snd_ctl_close(ctl);
-    return result;
-}
-
-float mixer_value_to_gain(const MixerValue& volume) {
-    if (!volume.ok) {
-        return 2.0f;
-    }
-
-    if (volume.min >= 0 && volume.max <= 2) {
-        return std::clamp(static_cast<float>(volume.value), 1.0f, 2.0f);
-    }
-
-    if (volume.min >= 0 && volume.max <= 512) {
-        return std::clamp(static_cast<float>(volume.value) / 256.0f, 1.0f, 2.0f);
-    }
-
-    if (volume.max > volume.min) {
-        const float normalized = static_cast<float>(volume.value - volume.min) / static_cast<float>(volume.max - volume.min);
-        return 1.0f + std::clamp(normalized, 0.0f, 1.0f);
-    }
-
-    return 2.0f;
-}
-
-MixerValue read_haptics_volume() {
-    MixerValue mic_volume = read_mixer_value("PCM Playback Volume");
-    if (mic_volume.ok && mic_volume.min >= 0 && mic_volume.max <= 512) {
-        return mic_volume;
-    }
-
-    MixerValue speaker_volume = read_mixer_value("PCM Capture Volume");
-    if (speaker_volume.ok) {
-        return speaker_volume;
-    }
-
-    return mic_volume;
-}
-}  // namespace
-
 int ALSARecord::init() {
-    const auto snd_name = find_uac_capture_device();
-    int ret = snd_pcm_open(&handle, snd_name.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+    const auto sndName = findUacCaptureDevice();
+
+    // audio
+    int ret = snd_pcm_open(&audioHandle, sndName.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
     if (ret < 0) {
-        std::cerr << "Failed to open PCM device: " << snd_strerror(ret) << std::endl;
-        return ret;
-    }
-    ret = snd_pcm_set_params(handle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 4, 48000, 1, 50 * 1000);
-    if (ret < 0) {
-        std::cerr << "Failed to set PCM parameters: " << snd_strerror(ret) << std::endl;
+        LOGE("snd_pcm_open err:%s", snd_strerror(ret));
         return ret;
     }
 
-    ret = snd_pcm_prepare(handle);
+    ret = snd_pcm_set_params(audioHandle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 4, 48000, 1, 50 * 1000);
     if (ret < 0) {
-        std::cerr << "Failed to prepare PCM: " << snd_strerror(ret) << std::endl;
-        return ret;
-    }
-    ret = snd_pcm_start(handle);
-    if (ret < 0) {
-        std::cerr << "Failed to start PCM: " << snd_strerror(ret) << std::endl;
+        LOGE("Failed to set PCM parameters: %s", snd_strerror(ret));
         return ret;
     }
 
-    ret = snd_pcm_open(&playbackHandle, snd_name.c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+    ret = snd_pcm_prepare(audioHandle);
     if (ret < 0) {
-        std::cerr << "Failed to open mic PCM device: " << snd_strerror(ret) << std::endl;
+        LOGE("Failed to prepare PCM: %s", snd_strerror(ret));
         return ret;
     }
-    ret = snd_pcm_set_params(playbackHandle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, kMicChannels, 48000, 1, 20 * 1000);
+    ret = snd_pcm_start(audioHandle);
     if (ret < 0) {
-        std::cerr << "Failed to set mono mic PCM parameters, retry stereo: " << snd_strerror(ret) << std::endl;
-        ret = snd_pcm_set_params(playbackHandle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 2, 48000, 1, 20 * 1000);
+        LOGE("Failed to start PCM: %s", snd_strerror(ret));
+        return ret;
+    }
+
+    audioNfds = snd_pcm_poll_descriptors_count(audioHandle);
+    if (audioNfds <= 0) {
+        LOGE("poll_descriptors_count = %d", audioNfds);
+        ret = -1;
+        return ret;
+    }
+    struct pollfd* pfds = static_cast<struct pollfd*>(calloc(audioNfds, sizeof(struct pollfd)));
+    if (pfds == nullptr) {
+        ret = -1;
+        return ret;
+    }
+    audioPollFds = std::unique_ptr<struct pollfd>(pfds);
+    defer {
+        if (ret != 0) {
+            audioPollFds = nullptr;
+        }
+    };
+
+    ret = snd_pcm_poll_descriptors(audioHandle, audioPollFds.get(), audioNfds);
+    if (ret < 0) {
+        LOGE("snd_pcm_poll_descriptors: %s", snd_strerror(ret));
+        return ret;
+    }
+
+    // mic
+    ret = snd_pcm_open(&micHandle, sndName.c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+    if (ret < 0) {
+        LOGE("Failed to open mic PCM device: %s", snd_strerror(ret));
+        return ret;
+    }
+    ret = snd_pcm_set_params(micHandle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, kMicChannels, 48000, 1, 20 * 1000);
+    if (ret < 0) {
+        LOGE("Failed to set mono mic PCM parameters, retry stereo: %s", snd_strerror(ret));
+        ret = snd_pcm_set_params(micHandle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 2, 48000, 1, 20 * 1000);
         if (ret < 0) {
-            std::cerr << "Failed to set mic PCM parameters: " << snd_strerror(ret) << std::endl;
+            LOGE("Failed to set mic PCM parameters: %s", snd_strerror(ret));
             return ret;
         }
         micPlaybackChannels = 2;
@@ -149,221 +99,116 @@ int ALSARecord::init() {
         micPlaybackChannels = 1;
     }
 
-    resampler.SetMode(true, 0, false);
-    resampler.SetRates(48000, 3000);
-    resampler.SetFeedMode(true);
-    resampler.Prealloc(2, 24, 6);
-
-    int error = 0;
-    opus = opus_encoder_create(48000, 2, OPUS_APPLICATION_AUDIO, &error);
-    if (error != OPUS_OK) {
-        std::cerr << "Failed to create opus encoder: " << error << std::endl;
-        return error;
-    }
-    opus_encoder_ctl(opus, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
-    opus_encoder_ctl(opus, OPUS_SET_BITRATE(200 * 8 * 100));
-    opus_encoder_ctl(opus, OPUS_SET_VBR(false));
-    opus_encoder_ctl(opus, OPUS_SET_COMPLEXITY(0));
-
-    micOpus = opus_decoder_create(48000, kMicChannels, &error);
-    if (error != OPUS_OK) {
-        std::cerr << "Failed to create mic opus decoder: " << error << std::endl;
-        return error;
-    }
-
+    audioInit([this](int16_t* buffer, size_t frames) -> size_t { return this->read(buffer, frames); });
     opened = true;
     return 0;
 }
 
-ssize_t ALSARecord::read(int16_t* buffer, snd_pcm_uframes_t frames) const {
+void ALSARecord::uninit() {
+    if (audioHandle != nullptr) {
+        snd_pcm_close(audioHandle);
+    }
+    if (micHandle != nullptr) {
+        snd_pcm_close(micHandle);
+    }
+    audioCleanup();
+}
+
+size_t ALSARecord::read(int16_t* buffer, size_t frames) const {
     if (!opened) {
         return 0;
     }
-    ssize_t ret = snd_pcm_readi(handle, buffer, frames);
+    ssize_t ret = snd_pcm_readi(audioHandle, buffer, frames);
     if (ret < 0) {
         if (ret == -EAGAIN) {
             return 0;
         }
-        snd_pcm_abort(handle);
-        snd_pcm_prepare(handle);
-        snd_pcm_start(handle);
+        snd_pcm_abort(audioHandle);
+        snd_pcm_prepare(audioHandle);
+        snd_pcm_start(audioHandle);
         return 0;
     }
     return ret;
 }
 
-ssize_t ALSARecord::writeMic(const int16_t* buffer, snd_pcm_uframes_t frames) const {
-    if (!playbackHandle) {
+size_t ALSARecord::writeMic(const int16_t* buffer, size_t frames) const {
+    if (!micHandle) {
         return 0;
     }
 
-    ssize_t ret = snd_pcm_writei(playbackHandle, buffer, frames);
+    ssize_t ret = snd_pcm_writei(micHandle, buffer, frames);
     if (ret < 0) {
         if (ret != -EAGAIN) {
-            snd_pcm_abort(playbackHandle);
-            snd_pcm_prepare(playbackHandle);
+            snd_pcm_abort(micHandle);
+            snd_pcm_prepare(micHandle);
         }
     }
     return ret;
 }
 
-void ALSARecord::mic_add_packet(const uint8_t* data, size_t size) {
-    static std::mutex micMutex;
-    std::lock_guard lock(micMutex);
-    static auto lastLog = std::chrono::steady_clock::now();
-    static unsigned packets = 0;
-    static unsigned decodedPackets = 0;
-    static int peak = 0;
-
-    if (!micOpus || size < kMicOpusSize) {
-        return;
-    }
-    packets++;
-
-    int16_t decoded[kMicFrames * kMicChannels] = {};
-    const int decodedFrames = opus_decode(micOpus, data, kMicOpusSize, decoded, kMicFrames, 0);
-    if (decodedFrames <= 0) {
-        static unsigned decodeErrors = 0;
-        if (decodeErrors++ < 20) {
-            std::cerr << "Mic opus decode failed: " << decodedFrames << std::endl;
-        }
-        return;
+int ALSARecord::xrunRecovery(snd_pcm_t* handle, int err) {
+    if (err == -EAGAIN) {
+        return 0;
     }
 
-    for (int frame = 0; frame < decodedFrames; ++frame) {
-        peak = std::max(peak, std::abs((int)decoded[frame]));
-    }
-    decodedPackets++;
-
-    if (bt.isMicMuted()) {
-        memset(decoded, 0, decodedFrames * kMicChannels * sizeof(int16_t));
-    }
-    if (micPlaybackChannels == 1) {
-        writeMic(decoded, decodedFrames);
-    } else {
-        int16_t stereo[kMicFrames * 2] = {};
-        for (int frame = 0; frame < decodedFrames; ++frame) {
-            stereo[frame * 2] = decoded[frame];
-            stereo[frame * 2 + 1] = decoded[frame];
-        }
-        writeMic(stereo, decodedFrames);
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    if (now - lastLog >= std::chrono::seconds(1)) {
-        std::cout << std::dec << "MIC packets=" << packets << " decoded=" << decodedPackets << " peak=" << peak << std::endl;
-        packets = 0;
-        decodedPackets = 0;
-        peak = 0;
-        lastLog = now;
-    }
+    snd_pcm_abort(handle);
+    snd_pcm_prepare(handle);
+    snd_pcm_start(handle);
+    return 0;
 }
 
-void ALSARecord::audio_loop() {
-    static int16_t buffer[32 * 4] = {};
-    auto frames = read(buffer, 32);
-    if (frames > 0) {
-        speaker_proc(buffer, frames);
-        haptics_proc(buffer, frames);
-    } else {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-void ALSARecord::haptics_proc(int16_t* data, ssize_t frames) {
-    static MixerValue haptics_volume = read_haptics_volume();
-    static auto last_gain_read = std::chrono::steady_clock::now();
-
-    WDL_ResampleSample* in_buf;
-    int nframes = resampler.ResamplePrepare(frames, 2, &in_buf);
-
-    for (int i = 0; i < nframes; i++) {
-        in_buf[i * 2] = (WDL_ResampleSample)(data[i * 4 + 2] / 32768.0f);
-        in_buf[i * 2 + 1] = (WDL_ResampleSample)(data[i * 4 + 3] / 32768.0f);
-    }
-
-    WDL_ResampleSample out_buf[64];
-    int out_frames = resampler.ResampleOut(out_buf, nframes, nframes / 4, 2);
-    static int8_t haptics_buf[64];
-    static int haptics_buf_pos = 0;
-
-    auto now = std::chrono::steady_clock::now();
-    if (now - last_gain_read >= std::chrono::seconds(1)) {
-        haptics_volume = read_haptics_volume();
-        last_gain_read = now;
-    }
-
-    for (int i = 0; i < out_frames; i++) {
-        int val_l = (int)(out_buf[i * 2] * 127.0f);
-        int val_r = (int)(out_buf[i * 2 + 1] * 127.0f);
-        haptics_buf[haptics_buf_pos++] = (int8_t)std::clamp(val_l, -128, 127);
-        haptics_buf[haptics_buf_pos++] = (int8_t)std::clamp(val_r, -128, 127);
-
-        if (haptics_buf_pos != 64) {
-            continue;
+bool ALSARecord::audioLoop() {
+    int ret = poll(audioPollFds.get(), audioNfds, 100);
+    if (ret < 0) {
+        if (errno == EINTR) {
+            return true;
         }
 
-        bt.sendCombine(reinterpret_cast<const uint8_t*>(haptics_buf), speaker_data);
-        haptics_buf_pos = 0;
+        LOGE("poll : %d", errno);
+        return false;
     }
+    if (ret == 0) {
+        LOGD("poll timeout");
+        return true;
+    }
+
+    /* 关键: 把 revents 翻译成 ALSA 事件 */
+    unsigned short revents = 0;
+    snd_pcm_poll_descriptors_revents(audioHandle, audioPollFds.get(), audioNfds, &revents);
+
+    if (revents & POLLERR) {
+        // 触发 XRUN 等, 走恢复路径
+        return xrunRecovery(audioHandle, -EPIPE) >= 0;
+    }
+    if ((revents & POLLIN) == 0) {
+        return true;  // 还没数据
+    }
+
+    /* 数据就绪, 读一个周期 */
+    config.audioActive = true;
+    audioLoop();
+    config.audioActive = false;
+    return true;
 }
 
-void ALSARecord::speaker_proc(int16_t* data, ssize_t frames) {
-    static WDL_Resampler speaker_resampler;
-    static bool speaker_resampler_ready = false;
-    static WDL_ResampleSample speaker_buf[512 * 2];
-    static int speaker_buf_pos = 0;
-
-    if (!speaker_resampler_ready) {
-        speaker_resampler.SetMode(true, 0, false);
-        speaker_resampler.SetRates(51200, 48000);
-        speaker_resampler.SetFeedMode(true);
-        speaker_resampler.Prealloc(2, 512, 480);
-        speaker_resampler_ready = true;
-    }
-
-    for (int i = 0; i < frames; i++) {
-        speaker_buf[speaker_buf_pos++] = static_cast<WDL_ResampleSample>(data[i * 4] / 32768.0f);
-        speaker_buf[speaker_buf_pos++] = static_cast<WDL_ResampleSample>(data[i * 4 + 1] / 32768.0f);
-
-        if (speaker_buf_pos != 512 * 2) {
-            continue;
-        }
-
-        WDL_ResampleSample* in_buf;
-        const int nframes = speaker_resampler.ResamplePrepare(512, 2, &in_buf);
-        memcpy(in_buf, speaker_buf, nframes * 2 * sizeof(WDL_ResampleSample));
-
-        WDL_ResampleSample resampled_buf[480 * 2];
-        speaker_resampler.ResampleOut(resampled_buf, nframes, 480, 2);
-        float out_buf[480 * 2];
-        for (int sample = 0; sample < 480 * 2; ++sample) {
-            out_buf[sample] = static_cast<float>(resampled_buf[sample]);
-        }
-
-        opus_encode_float(opus, out_buf, 480, speaker_data, 200);
-        speaker_buf_pos = 0;
-    }
-}
-
-std::string ALSARecord::find_uac_capture_device() {
+std::string ALSARecord::findUacCaptureDevice() {
     int card = -1;
     while (snd_card_next(&card) >= 0 && card >= 0) {
         char* name = nullptr;
         if (snd_card_get_name(card, &name) >= 0 && name) {
             std::string card_name(name);
             free(name);
-            printf("snd card name:%s\n", card_name.c_str());
+            LOGI("snd card name:%s", card_name.c_str());
             if (card_name.find("UAC2") != std::string::npos || card_name.find("Gadget") != std::string::npos ||
                 card_name.find("gadget") != std::string::npos || card_name.find("USB") != std::string::npos) {
                 char device[32];
                 snprintf(device, sizeof(device), "hw:%d,0", card);
-                printf("[Audio] Found UAC gadget ALSA device: %s (%s)\n", device, card_name.c_str());
+                LOGI("[Audio] Found UAC gadget ALSA device: %s (%s)", device, card_name.c_str());
                 return std::string(device);
             }
         }
     }
 
-    printf("[Audio] No UAC gadget card found, trying hw:0,0\n");
+    LOGI("[Audio] No UAC gadget card found, trying hw:0,0");
     return "hw:0,0";
 }

@@ -451,35 +451,6 @@ ssize_t BTHID::sendCombineWithRoute(const uint8_t *haptics, const uint8_t *speak
     // Utils::print_hex(pkt, sizeof(pkt));
     const ssize_t ret = send(pkt, sizeof(pkt));
 
-    static auto lastLog = std::chrono::steady_clock::now();
-    static unsigned writes = 0;
-    static unsigned shortWrites = 0;
-    static unsigned errors = 0;
-    writes++;
-    if (ret < 0) {
-        errors++;
-    } else if (ret != static_cast<ssize_t>(sizeof(pkt))) {
-        shortWrites++;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastLog >= std::chrono::seconds(1)) {
-        std::cout << std::dec << "BT AUDIO mode=" << (legacyPacket ? "legacy" : "state")
-                  << " stateMode=" << audio_state_mode()
-                  << " route=0x" << std::hex << static_cast<int>(route)
-                  << " audio=" << static_cast<int>(stateData[6])
-                  << "," << static_cast<int>(stateData[7])
-                  << "," << static_cast<int>(stateData[8])
-                  << "," << static_cast<int>(stateData[9])
-                  << "," << static_cast<int>(stateData[37])
-                  << std::dec << " writes=" << writes
-                  << " short=" << shortWrites
-                  << " errors=" << errors
-                  << " lastRet=" << ret << std::endl;
-        writes = 0;
-        shortWrites = 0;
-        errors = 0;
-        lastLog = now;
-    }
     return ret;
 }
 

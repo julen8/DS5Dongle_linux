@@ -32,18 +32,19 @@ add_subdirectory(libs/opus)
 
 add_executable(ds5_dongle_linux
         src/USBGadget.cpp
-        src/USBGadget.h
         src/main.cpp
         src/DebugHIDInput.cpp
-        src/DebugHIDInput.h
         src/ALSARecord.cpp
-        src/ALSARecord.h
         src/USBHID.cpp
-        src/USBHID.h
         src/BTHID.cpp
-        src/BTHID.h
         src/Utils.cpp
-        src/Utils.h)
+        src/bluetoothPacket.cpp
+        src/audio.cpp
+        src/config.cpp)
+
+target_include_directories(ds5_dongle_linux PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/inc
+)
 
 target_compile_options(ds5_dongle_linux PRIVATE -fsigned-char -Wall -Wextra -Wno-unused-parameter)
 target_compile_definitions(ds5_dongle_linux PRIVATE WDL_RESAMPLE_TYPE=float)

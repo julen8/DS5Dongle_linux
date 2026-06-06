@@ -16,16 +16,16 @@
 
 #include "ALSARecord.h"
 #include "BTHID.h"
-#include "DebugHIDInput.h"
 #include "USBGadget.h"
 #include "USBHID.h"
 #include "Utils.h"
 
 USBGadget gadget;
 BTHID bt;
-DebugHIDInput debugInput;
 USBHID usb;
 ALSARecord recorder(bt);
+
+ssize_t btSend(uint8_t* data, size_t size) { return bt.send(data, size); }
 
 bool find_bt_report31(const uint8_t* data, size_t size, size_t& offset) {
     if (size >= 78 && data[0] == 0x31) {
@@ -127,17 +127,6 @@ void forward_usb_feature_report(uint8_t reportId, const uint8_t* payload, size_t
     }
 }
 
-void apply_short_input_report(const std::vector<std::uint8_t>& data) {
-    if (data.size() != 10 || data[0] != 0x01) {
-        return;
-    }
-
-    memcpy(interrupt_data + 1, data.data() + 1, 6);
-    interrupt_data[7] = 0x01;
-    memcpy(interrupt_data + 8, data.data() + 7, 3);
-    log_usb_input_controls();
-}
-
 void log_usb_input_controls() {
     static std::array<uint8_t, 9> lastControls = {};
     static int logCount = 0;
@@ -178,8 +167,9 @@ void log_bt_report_shape(const std::vector<std::uint8_t>& data) {
 
 void audio_task(const std::stop_token& stop_token) {
     while (!stop_token.stop_requested()) {
-        recorder.audio_loop();
+        recorder.audioLoop();
     }
+    recorder.uninit();
 }
 
 int event_bus() {
@@ -220,18 +210,6 @@ int event_bus() {
             std::cerr << "USB HID became unhealthy; exiting for service restart" << std::endl;
             close(epoll_fd);
             return 3;
-        }
-        if (debugInput.available() && !debugInput.healthy()) {
-            std::cerr << "DualSense debug HID became unhealthy; exiting for service restart" << std::endl;
-            close(epoll_fd);
-            return 6;
-        }
-
-        if (debugInput.available() && debugInput.drain(interrupt_data, sizeof(interrupt_data),
-                                                       [](const uint8_t* data, size_t size) { recorder.mic_add_packet(data, size); })) {
-            bt.setHeadset(headset_connected_from_status(interrupt_data[54]));
-            bt.handleMicButton(mic_button_pressed_from_usb_report(interrupt_data, sizeof(interrupt_data)));
-            log_usb_input_controls();
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -325,18 +303,8 @@ int event_bus() {
                     std::cout << std::endl;
                     btRawLogCount++;
                 }
-                if (data.size() == 10 && data[0] == 0x01) {
-                    if (!debugInput.available()) {
-                        apply_short_input_report(data);
-                    }
-                    continue;
-                }
                 if (data.size() < 65) {
                     continue;
-                }
-                size_t micPayloadOffset = 0;
-                if (is_mic_input_report(data.data(), data.size(), micPayloadOffset)) {
-                    recorder.mic_add_packet(data.data() + micPayloadOffset, data.size() - micPayloadOffset);
                 }
                 if (!is_full_bt_input_report(data.data(), data.size())) {
                     continue;
@@ -382,8 +350,6 @@ int main() {
     if (bt.init() != 0) {
         return -1;
     }
-
-    debugInput.init();
 
     if (recorder.init() != 0) {
         return -1;
