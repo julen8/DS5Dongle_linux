@@ -1,32 +1,29 @@
 // 编译: gcc alsa_poll_capture.c -o alsa_poll_capture -lasound
+#include <alsa/asoundlib.h>
+#include <errno.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <poll.h>
-#include <alsa/asoundlib.h>
 
-#define PCM_DEVICE      "default"   // 也可以用 "hw:0,0" / "plughw:1,0"
-#define SAMPLE_RATE     16000
-#define CHANNELS        1
-#define FORMAT          SND_PCM_FORMAT_S16_LE
-#define PERIOD_FRAMES   1024        // 一个周期(period)的帧数, poll 每 period 唤醒一次
+#define PCM_DEVICE "default"  // 也可以用 "hw:0,0" / "plughw:1,0"
+#define SAMPLE_RATE 16000
+#define CHANNELS 1
+#define FORMAT SND_PCM_FORMAT_S16_LE
+#define PERIOD_FRAMES 1024  // 一个周期(period)的帧数, poll 每 period 唤醒一次
 
-static int xrun_recovery(snd_pcm_t *handle, int err)
-{
-    if (err == -EPIPE) {            // overrun
+static int xrun_recovery(snd_pcm_t *handle, int err) {
+    if (err == -EPIPE) {  // overrun
         fprintf(stderr, "overrun, recovering...\n");
         err = snd_pcm_prepare(handle);
     } else if (err == -ESTRPIPE) {  // suspended
-        while ((err = snd_pcm_resume(handle)) == -EAGAIN)
-            usleep(100 * 1000);
+        while ((err = snd_pcm_resume(handle)) == -EAGAIN) usleep(100 * 1000);
         if (err < 0) err = snd_pcm_prepare(handle);
     }
     return err;
 }
 
-int main(void)
-{
+int main(void) {
     snd_pcm_t *pcm = NULL;
     int err;
 
@@ -38,11 +35,7 @@ int main(void)
     }
 
     /* 2. 简便参数配置 */
-    err = snd_pcm_set_params(pcm,
-                             FORMAT,
-                             SND_PCM_ACCESS_RW_INTERLEAVED,
-                             CHANNELS,
-                             SAMPLE_RATE,
+    err = snd_pcm_set_params(pcm, FORMAT, SND_PCM_ACCESS_RW_INTERLEAVED, CHANNELS, SAMPLE_RATE,
                              1,            // soft_resample
                              100 * 1000);  // latency 100ms
     if (err < 0) {
@@ -77,8 +70,8 @@ int main(void)
     short buffer[PERIOD_FRAMES * CHANNELS];
     int frame_bytes = CHANNELS * snd_pcm_format_width(FORMAT) / 8;
 
-    for (int loop = 0; loop < 500; loop++) {        // 演示读 500 个周期
-        int ret = poll(pfds, nfds, 1000);           // 1s 超时
+    for (int loop = 0; loop < 500; loop++) {  // 演示读 500 个周期
+        int ret = poll(pfds, nfds, 1000);     // 1s 超时
         if (ret < 0) {
             if (errno == EINTR) continue;
             perror("poll");
@@ -98,8 +91,7 @@ int main(void)
             if (xrun_recovery(pcm, -EPIPE) < 0) break;
             continue;
         }
-        if (!(revents & POLLIN))
-            continue;   // 还没数据
+        if (!(revents & POLLIN)) continue;  // 还没数据
 
         /* 数据就绪, 读一个周期 */
         snd_pcm_sframes_t frames = snd_pcm_readi(pcm, buffer, PERIOD_FRAMES);

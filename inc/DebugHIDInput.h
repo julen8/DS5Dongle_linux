@@ -20,11 +20,7 @@ public:
     int init();
     bool available() const { return fd >= 0 && !failed; }
     bool healthy() const { return !failed; }
-    bool drain(
-        uint8_t* report,
-        size_t size,
-        const std::function<void(const uint8_t*, size_t)>& micPacket = {}
-    );
+    bool drain(uint8_t* report, size_t size, const std::function<void(const uint8_t*, size_t)>& micPacket = {});
 };
 
-#endif // DS5_DONGLE_LINUX_DEBUGHIDINPUT_H
+#endif  // DS5_DONGLE_LINUX_DEBUGHIDINPUT_H

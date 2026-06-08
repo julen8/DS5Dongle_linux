@@ -132,30 +132,24 @@ inline void cleanRemainingData() {
     cleanAllCachedHaptic();
 }
 
-void audioLoop() {
-    // TODO: snd_pcm_state
-    // if (tud_audio_available() == 0) {
-    //     if (!config.audioActive) {
-    //         // usb已经停止发送pcm数据了,但是这里需要把剩下的缓存的数据处理完
-    //         if (audio.needClean) {
-    //             audio.needClean = false;
-    //             audio.needSendFirstMuteOpusPackage = true;
-    //             cleanRemainingData();
-    //         }
-    //     }
-
-    //     return;
-    // }
+bool runOnce() {
+    if (!config.audioActive) {
+        // usb已经停止发送pcm数据了,但是这里需要把剩下的缓存的数据处理完
+        if (audio.needClean) {
+            audio.needClean = false;
+            audio.needSendFirstMuteOpusPackage = true;
+            cleanRemainingData();
+        }
+    }
 
     static int16_t raw[readRawFrames * inputChannels];
-    // todo ALSARecord::read(raw + (audio.rawPos * inputChannels), readRawFrames - audio.rawPos)
     const auto actualRawFrames = audio.readCallback(raw + (audio.rawPos * inputChannels), readRawFrames - audio.rawPos);
     if (actualRawFrames == 0) {
-        return;
+        return false;
     }
     audio.rawPos += actualRawFrames;
     if (audio.rawPos < readRawFrames) {
-        return;
+        return true;
     }
     if (audio.rawPos != readRawFrames) {
         LOGW("audio.rawPos != readRawFrames: %u", audio.rawPos);
@@ -181,10 +175,6 @@ void audioLoop() {
 
                 audio.audioRawFifo.push(audio.currentAudioRawElement);
                 audio.currentAudioRawElement = nullptr;
-            } else if (audio.audioBufPos == audioResamplerInputFrames * audioChannels / 2) {
-                // 音频在另外一个core通知发送会有问题，所以在这里来通知，假设到一半的时候opus已经编码好了
-                // TODO
-                // btRequestSend();
             }
         }
     }
@@ -236,6 +226,13 @@ void audioLoop() {
             audio.hapticBufPos = 0;
         }
     }
+
+    return true;
+}
+
+void audioLoop() {
+    while (runOnce()) {
+    }
 }
 
 void audioProcessThread(const std::stop_token& stop_token) {
@@ -251,7 +248,7 @@ void audioProcessThread(const std::stop_token& stop_token) {
             audioRawElement = *audioRawElementPtr;
             audio.audioRawFifo.pop();
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
             continue;
         }
 

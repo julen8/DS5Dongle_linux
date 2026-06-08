@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <thread>
@@ -18,12 +17,12 @@
 #include "BTHID.h"
 #include "USBGadget.h"
 #include "USBHID.h"
-#include "Utils.h"
+#include "log.h"
 
-USBGadget gadget;
-BTHID bt;
-USBHID usb;
-ALSARecord recorder(bt);
+USBGadget gadget{};
+BTHID bt{};
+USBHID usb{};
+ALSARecord recorder{};
 
 ssize_t btSend(uint8_t* data, size_t size) { return bt.send(data, size); }
 
@@ -167,7 +166,7 @@ void log_bt_report_shape(const std::vector<std::uint8_t>& data) {
 
 void audio_task(const std::stop_token& stop_token) {
     while (!stop_token.stop_requested()) {
-        recorder.audioLoop();
+        recorder.runOnce();
     }
     recorder.uninit();
 }
@@ -255,7 +254,7 @@ int event_bus() {
                 if (data.empty()) {
                     continue;
                 }
-                log_usb_raw(data);
+                // log_usb_raw(data);
                 if (data.size() == 47) {
                     bt.setStateData(data.data(), data.size());
 
@@ -292,17 +291,7 @@ int event_bus() {
                 if (data.empty()) {
                     continue;
                 }
-                log_bt_report_shape(data);
-                static int btRawLogCount = 0;
-                if (btRawLogCount < 20) {
-                    std::cout << "BT RAW len=" << data.size() << " data=";
-                    const size_t limit = std::min(data.size(), static_cast<size_t>(20));
-                    for (size_t index = 0; index < limit; ++index) {
-                        printf("%02x ", data[index]);
-                    }
-                    std::cout << std::endl;
-                    btRawLogCount++;
-                }
+                // log_bt_report_shape(data);
                 if (data.size() < 65) {
                     continue;
                 }
@@ -315,11 +304,6 @@ int event_bus() {
                 std::array<uint8_t, 16> btControls = {};
                 memcpy(btControls.data(), data.data(), btControls.size());
                 if (!haveLastBtControls || btControls != lastBtControls) {
-                    std::cout << "BT INPUT controls=";
-                    for (uint8_t byte : btControls) {
-                        printf("%02x ", byte);
-                    }
-                    std::cout << std::endl;
                     lastBtControls = btControls;
                     haveLastBtControls = true;
                 }
@@ -357,27 +341,29 @@ int main() {
 
     // Init DualSense
 
-    auto ret = bt.sendInitialState();
+    if (auto ret = bt.sendInitialState(); !ret) {
+        LOGE("sendInitialState");
+    }
 
     std::cout << "Get Controller and Host MAC" << std::endl;
     auto report_0x09 = bt.get_feature_report(0x09, 20);
-    ret = usb.set_get_report(0x09, report_0x09);
-    Utils::print_hex(report_0x09);
+    auto ret = usb.set_get_report(0x09, report_0x09);
+    printHex(report_0x09.data(), report_0x09.size());
 
     std::cout << "Get Controller Version/Data (Firmware Info)" << std::endl;
     auto report_0x20 = bt.get_feature_report(0x20, 64);
     ret = usb.set_get_report(0x20, report_0x20);
-    Utils::print_hex(report_0x20);
+    printHex(report_0x20.data(), report_0x20.size());
 
     std::cout << "Get Hardware Info" << std::endl;
     auto report_0x22 = bt.get_feature_report(0x22, 64);
     ret = usb.set_get_report(0x22, report_0x22);
-    Utils::print_hex(report_0x22);
+    printHex(report_0x22.data(), report_0x22.size());
 
     std::cout << "Get Calibration" << std::endl;
     auto report_0x05 = bt.get_feature_report(0x05, 41);
     ret = usb.set_get_report(0x05, report_0x05);
-    Utils::print_hex(report_0x05);
+    printHex(report_0x05.data(), report_0x05.size());
 
     auto thread2 = std::jthread(audio_task);
     return event_bus();

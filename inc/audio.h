@@ -5,6 +5,6 @@
 
 using ReadCallback = std::function<size_t(int16_t*, size_t)>;
 
-void audioInit(ReadCallback readcallback);
+void audioInit(ReadCallback readCallback);
 void audioCleanup();
 void audioLoop();

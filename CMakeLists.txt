@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 SET(EXECUTABLE_OUTPUT_PATH  ${PROJECT_SOURCE_DIR}/bin)
 
 
-option(STATIC_LINK "Prefer static linking where possible" ON)
+option(STATIC_LINK "Prefer static linking where possible" OFF)
 if (STATIC_LINK)
     include(cmake/AlsaStatic.cmake)
 else ()
@@ -37,7 +37,6 @@ add_executable(ds5_dongle_linux
         src/ALSARecord.cpp
         src/USBHID.cpp
         src/BTHID.cpp
-        src/Utils.cpp
         src/bluetoothPacket.cpp
         src/audio.cpp
         src/config.cpp)

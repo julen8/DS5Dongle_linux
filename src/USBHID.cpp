@@ -4,31 +4,29 @@
 
 #include "USBHID.h"
 
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <iostream>
 #include <ostream>
 #include <string>
-#include <unistd.h>
-#include <sys/ioctl.h>
 
 namespace {
 bool is_transient_errno(int error) {
-    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR ||
-        error == EPIPE || error == ESHUTDOWN || error == ENODEV;
+    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR || error == EPIPE || error == ESHUTDOWN || error == ENODEV;
 }
 
-bool is_unsupported_get_report_errno(int error) {
-    return error == ENOTTY || error == EINVAL || error == ENOSYS;
-}
-}
+bool is_unsupported_get_report_errno(int error) { return error == ENOTTY || error == EINVAL || error == ENOSYS; }
+}  // namespace
 
 #if __has_include(<linux/usb/g_hid.h>)
-#include <linux/usb/g_hid.h>
+#    include <linux/usb/g_hid.h>
 #else
-#define MAX_REPORT_LENGTH 64
+#    define MAX_REPORT_LENGTH 64
 
 struct usb_hidg_report {
     uint8_t report_id;
@@ -38,8 +36,8 @@ struct usb_hidg_report {
     uint8_t padding[4];
 };
 
-#define GADGET_HID_READ_GET_REPORT_ID _IOR('g', 0x41, uint8_t)
-#define GADGET_HID_WRITE_GET_REPORT _IOW('g', 0x42, struct usb_hidg_report)
+#    define GADGET_HID_READ_GET_REPORT_ID _IOR('g', 0x41, uint8_t)
+#    define GADGET_HID_WRITE_GET_REPORT _IOW('g', 0x42, struct usb_hidg_report)
 #endif
 
 int USBHID::init() {
@@ -71,7 +69,7 @@ ssize_t USBHID::send(uint8_t* data, size_t size) const {
 
 std::vector<std::uint8_t> USBHID::recv() const {
     std::vector<std::uint8_t> data(128);
-    const long ret = read(fd,data.data(), data.size());
+    const long ret = read(fd, data.data(), data.size());
     if (ret < 0) {
         if (!is_transient_errno(errno)) {
             failed.store(true);
@@ -84,7 +82,7 @@ std::vector<std::uint8_t> USBHID::recv() const {
     return data;
 }
 
-ssize_t USBHID::set_get_report(uint8_t reportId, const std::vector<uint8_t> &data) const {
+ssize_t USBHID::set_get_report(uint8_t reportId, const std::vector<uint8_t>& data) const {
     usb_hidg_report report{};
     report.report_id = reportId;
     report.userspace_req = 0;

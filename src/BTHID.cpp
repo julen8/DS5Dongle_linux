@@ -4,11 +4,17 @@
 
 #include "BTHID.h"
 
+#include <fcntl.h>
+#include <linux/hidraw.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,49 +22,38 @@
 #include <ostream>
 #include <queue>
 #include <string>
-#include <cstdlib>
-#include <cmath>
-#include <unistd.h>
-#include <linux/hidraw.h>
-#include <sys/ioctl.h>
 
-#include "Utils.h"
-
-#define BUFFER_LENGTH           64
+#define BUFFER_LENGTH 64
 
 namespace {
-bool is_transient_errno(int error) {
-    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR;
-}
+bool is_transient_errno(int error) { return error == EAGAIN || error == EWOULDBLOCK || error == EINTR; }
 
 bool mic_experiment_enabled() {
-    const char* value = std::getenv("DS5_ENABLE_BT_MIC");
+    const char *value = std::getenv("DS5_ENABLE_BT_MIC");
     return value && std::string(value) != "0";
 }
 
 bool mic_button_mute_enabled() {
-    const char* value = std::getenv("DS5_BT_MIC_BUTTON_MUTE");
+    const char *value = std::getenv("DS5_BT_MIC_BUTTON_MUTE");
     return !value || std::string(value) != "0";
 }
 
 bool use_legacy_audio_packet() {
-    const char* mode = std::getenv("DS5_AUDIO_PACKET_MODE");
+    const char *mode = std::getenv("DS5_AUDIO_PACKET_MODE");
     return mode && std::string(mode) == "legacy";
 }
 
 std::string audio_state_mode() {
-    const char* mode = std::getenv("DS5_AUDIO_STATE_MODE");
+    const char *mode = std::getenv("DS5_AUDIO_STATE_MODE");
     if (mode) {
         return std::string(mode);
     }
     return mic_experiment_enabled() ? std::string("pico-mic") : std::string("linux");
 }
 
-uint8_t clamp_byte(int value, int minValue, int maxValue) {
-    return static_cast<uint8_t>(std::clamp(value, minValue, maxValue));
-}
+uint8_t clamp_byte(int value, int minValue, int maxValue) { return static_cast<uint8_t>(std::clamp(value, minValue, maxValue)); }
 
-void set_mic_mute_fields(std::array<uint8_t, 63>& stateData, bool muted) {
+void set_mic_mute_fields(std::array<uint8_t, 63> &stateData, bool muted) {
     stateData[1] |= 0x03;
     stateData[8] = muted ? 0x01 : 0x00;
     if (muted) {
@@ -67,15 +62,14 @@ void set_mic_mute_fields(std::array<uint8_t, 63>& stateData, bool muted) {
         stateData[9] &= static_cast<uint8_t>(~0x10);
     }
 }
-}
+}  // namespace
 
 uint32_t crc32_output(const uint8_t *data, std::size_t size) {
-    uint32_t crc = ~0xEADA2D49; // 0xA2 seed
+    uint32_t crc = ~0xEADA2D49;  // 0xA2 seed
 
     while (size--) {
         crc ^= *data++;
-        for (unsigned i = 0; i < 8; i++)
-            crc = ((crc >> 1) ^ (0xEDB88320 & -(crc & 1)));
+        for (unsigned i = 0; i < 8; i++) crc = ((crc >> 1) ^ (0xEDB88320 & -(crc & 1)));
     }
 
     return ~crc;
@@ -83,12 +77,11 @@ uint32_t crc32_output(const uint8_t *data, std::size_t size) {
 
 uint32_t crc32_feature(const uint8_t *data, std::size_t size) {
     // https://github.com/rafaelvaloto/Dualsense-Multiplatform/blob/main/Source/Private/GCore/Utils/CR32.cpp
-    uint32_t crc = ~0x2060efc3; // 0x53 seed
+    uint32_t crc = ~0x2060efc3;  // 0x53 seed
 
     while (size--) {
         crc ^= *data++;
-        for (unsigned i = 0; i < 8; i++)
-            crc = ((crc >> 1) ^ (0xEDB88320 & -(crc & 1)));
+        for (unsigned i = 0; i < 8; i++) crc = ((crc >> 1) ^ (0xEDB88320 & -(crc & 1)));
     }
 
     return ~crc;
@@ -103,7 +96,7 @@ inline void fill_output_report_checksum(uint8_t *data, size_t len) {
 }
 
 inline void fill_feature_report_checksum(uint8_t *data, const size_t len) {
-    uint32_t crc = crc32_feature(data,len - 4);
+    uint32_t crc = crc32_feature(data, len - 4);
     data[len - 4] = (crc >> 0) & 0xFF;
     data[len - 3] = (crc >> 8) & 0xFF;
     data[len - 2] = (crc >> 16) & 0xFF;
@@ -111,7 +104,7 @@ inline void fill_feature_report_checksum(uint8_t *data, const size_t len) {
 }
 
 int BTHID::init() {
-    for (const auto& entry : std::filesystem::directory_iterator("/sys/class/hidraw")) {
+    for (const auto &entry : std::filesystem::directory_iterator("/sys/class/hidraw")) {
         const std::string name = entry.path().filename().string();
         std::string ueventPath = entry.path().string() + "/device/uevent";
         std::ifstream uevent(ueventPath);
@@ -169,7 +162,7 @@ std::vector<std::uint8_t> BTHID::recv() const {
     return data;
 }
 
-void BTHID::setStateData(const uint8_t* data, size_t size) {
+void BTHID::setStateData(const uint8_t *data, size_t size) {
     const size_t stateSize = std::min(size, stateData.size());
     std::lock_guard lock(outputMutex);
     memcpy(stateData.data(), data, stateSize);
@@ -240,8 +233,7 @@ void BTHID::setHeadset(bool connected) {
 
     sendStateReportLocked();
 
-    std::cout << "BT audio route state=" << (connected ? "headset" : "speaker")
-              << std::dec << std::endl;
+    std::cout << "BT audio route state=" << (connected ? "headset" : "speaker") << std::dec << std::endl;
 }
 
 void BTHID::setMicMuted(bool muted) {
@@ -273,8 +265,7 @@ void BTHID::sendAudioControlState() {
     normalizeAudioStateLocked();
     sendStateReportLocked();
     std::cout << "BT mic state=" << (micMuted.load(std::memory_order_relaxed) ? "muted" : "unmuted")
-              << " micVolume=" << static_cast<int>(micVolume.load(std::memory_order_relaxed))
-              << std::dec << std::endl;
+              << " micVolume=" << static_cast<int>(micVolume.load(std::memory_order_relaxed)) << std::dec << std::endl;
 }
 
 ssize_t BTHID::sendBluetoothControlFeature(uint8_t state) const {
@@ -296,7 +287,7 @@ void BTHID::enableBluetoothMicExperiment() {
     std::cout << "BT mic experiment enabled feature08=" << btRet << std::dec << std::endl;
 }
 
-void BTHID::applyUsbAudioFeatureReport(const uint8_t* data, size_t size) {
+void BTHID::applyUsbAudioFeatureReport(const uint8_t *data, size_t size) {
     if (!data || size < 2) {
         return;
     }
@@ -318,7 +309,7 @@ void BTHID::applyUsbAudioFeatureReport(const uint8_t* data, size_t size) {
     }
 }
 
-void BTHID::applyUsbOutputReport(const uint8_t* data, size_t size) {
+void BTHID::applyUsbOutputReport(const uint8_t *data, size_t size) {
     if (!data || size < 8) {
         return;
     }
@@ -334,11 +325,9 @@ void BTHID::applyUsbOutputReport(const uint8_t* data, size_t size) {
     }
 }
 
-void BTHID::setAudioRouteOverride(uint8_t route) {
-    audioRouteOverride.store(route, std::memory_order_relaxed);
-}
+void BTHID::setAudioRouteOverride(uint8_t route) { audioRouteOverride.store(route, std::memory_order_relaxed); }
 
-ssize_t BTHID::sendInitialState() {
+bool BTHID::sendInitialState() {
     uint8_t report32[142] = {};
     ssize_t ret = 0;
     {
@@ -356,7 +345,7 @@ ssize_t BTHID::sendInitialState() {
     if (mic_experiment_enabled()) {
         enableBluetoothMicExperiment();
     }
-    return ret;
+    return ret == sizeof(report32);
 }
 
 ssize_t BTHID::sendHaptics(const uint8_t *data) {
@@ -372,7 +361,7 @@ ssize_t BTHID::sendHaptics(const uint8_t *data) {
     pkt[6] = BUFFER_LENGTH;
     pkt[7] = BUFFER_LENGTH;
     pkt[8] = BUFFER_LENGTH;
-    pkt[9] = BUFFER_LENGTH; // buffer length
+    pkt[9] = BUFFER_LENGTH;  // buffer length
     pkt[10] = packetCounter++;
     pkt[11] = 0x12 | (1 << 7);
     pkt[12] = 64;
@@ -394,9 +383,9 @@ ssize_t BTHID::sendSpeaker(const uint8_t *data) {
     pkt[6] = BUFFER_LENGTH;
     pkt[7] = BUFFER_LENGTH;
     pkt[8] = BUFFER_LENGTH;
-    pkt[9] = BUFFER_LENGTH; // buffer length
+    pkt[9] = BUFFER_LENGTH;  // buffer length
     pkt[10] = packetCounter++;
-    pkt[11] = 0x16 | 0 << 6 | 1 << 7; // Speaker: 0x13 Headset: 0x16
+    pkt[11] = 0x16 | 0 << 6 | 1 << 7;  // Speaker: 0x13 Headset: 0x16
     pkt[12] = 200;
     memcpy(pkt + 13, data, 200);
 
@@ -426,7 +415,7 @@ ssize_t BTHID::sendCombineWithRoute(const uint8_t *haptics, const uint8_t *speak
     pkt[6] = bufferLength;
     pkt[7] = bufferLength;
     pkt[8] = bufferLength;
-    pkt[9] = bufferLength; // audio buffer length
+    pkt[9] = bufferLength;  // audio buffer length
     pkt[10] = packetCounter++;
     route = route ? route : (headset.load() ? 0x16 : 0x13);
     if (legacyPacket) {

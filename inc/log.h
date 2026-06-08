@@ -30,9 +30,12 @@
 #define LOGE(fmt, ...) LOGE_FUNC_NAME(__func__, fmt, ##__VA_ARGS__)
 
 #if ENABLE_DEBUG
-inline void printHex(const uint8_t *data, size_t size) {
+inline void printHex(const uint8_t* data, size_t size) {
     for (size_t i = 0; i < size; i++) {
         printf("%02x ", static_cast<unsigned>(data[i]));
+        if (i % 10 == 0 && i > 0) {
+            printf("\n");
+        }
     }
     printf("\n");
 }

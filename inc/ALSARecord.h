@@ -9,27 +9,32 @@
 #include <memory>
 #include <string>
 
-#include "BTHID.h"
-
 class ALSARecord {
-private:
-    bool opened = false;
-    snd_pcm_t* audioHandle = nullptr;
-    snd_pcm_t* micHandle = nullptr;
-    int micPlaybackChannels = 1;
-    BTHID& bt;
-    std::unique_ptr<struct pollfd> audioPollFds = nullptr;
-    int audioNfds = 0;
-    std::string findUacCaptureDevice();
-    static int xrunRecovery(snd_pcm_t* handle, int err);
-
 public:
+    ALSARecord() = default;
+    ~ALSARecord();
+
     int init();
     void uninit();
     // return: read frames
-    size_t read(int16_t* buffer, size_t frames) const;
-    size_t writeMic(const int16_t* buffer, size_t frames) const;
-    bool audioLoop();
-    ALSARecord(BTHID& bt) : bt(bt) {}
-    ~ALSARecord() = default;
+    size_t read(int16_t *buffer, size_t frames) const;
+    size_t writeMic(const int16_t *buffer, size_t frames) const;
+    bool runOnce();
+
+private:
+    static std::string findUacCaptureDevice();
+    std::string pcmToCtlName();
+    static void xrunRecovery(snd_pcm_t *handle, long err);
+    void handleCtlEvents();
+    static void onItfChanged(bool audioActive, long rate);
+    bool getAudioActive(long *rate);
+
+    bool opened = false;
+    snd_pcm_t *audioHandle = nullptr;
+    snd_ctl_t *ctlHandle = nullptr;
+    snd_pcm_t *micHandle = nullptr;
+    int micPlaybackChannels = 1;
+    std::unique_ptr<struct pollfd> pollFds = nullptr;
+    int audioPcmNfds = 0;
+    int audioCtlNfds = 0;
 };
