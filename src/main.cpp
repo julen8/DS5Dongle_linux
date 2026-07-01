@@ -2,7 +2,6 @@
 // Created by awalol on 2026/3/29.
 //
 
-#include <sys/epoll.h>
 #include <unistd.h>
 
 #include <array>
@@ -15,6 +14,7 @@
 
 #include "ALSARecord.h"
 #include "BTHID.h"
+#include "EventLoop.h"
 #include "USBGadget.h"
 #include "USBHID.h"
 #include "log.h"
@@ -69,8 +69,6 @@ uint8_t interrupt_data[64] = {0x01, 0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7, 0x
                               0xfc, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00,
                               0x00, 0xa7, 0xad, 0x60, 0x00, 0x29, 0x18, 0x00, 0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b};
 
-void log_usb_input_controls();
-
 bool headset_connected_from_status(uint8_t status) { return (status & 0x01) != 0; }
 
 bool mic_button_pressed_from_usb_report(const uint8_t* data, size_t size) { return size > 10 && (data[10] & 0x04) != 0; }
@@ -85,34 +83,7 @@ bool mic_button_pressed_from_bt_report31(const uint8_t* data, size_t size) {
     return false;
 }
 
-void sync_usb_mic_mute_status() {
-    if (bt.isMicMuted()) {
-        interrupt_data[54] |= 0x04;
-    } else {
-        interrupt_data[54] &= static_cast<uint8_t>(~0x04);
-    }
-}
-
-bool hid_no_out_endpoint_enabled() {
-    const char* value = std::getenv("DS5_HID_NO_OUT_ENDPOINT");
-    return value && std::string(value) != "0";
-}
-
-void log_usb_raw(const std::vector<std::uint8_t>& data) {
-    static int count = 0;
-    if (count++ >= 80) {
-        return;
-    }
-
-    std::cout << "USB RAW len=" << data.size() << " data=";
-    const size_t limit = std::min(data.size(), static_cast<size_t>(32));
-    for (size_t index = 0; index < limit; ++index) {
-        printf("%02x ", data[index]);
-    }
-    std::cout << std::endl;
-}
-
-void forward_usb_feature_report(uint8_t reportId, const uint8_t* payload, size_t size) {
+void forwardUsbFeatureReport(uint8_t reportId, const uint8_t* payload, size_t size) {
     std::vector<uint8_t> report(size + 1);
     report[0] = reportId;
     if (size > 0) {
@@ -126,193 +97,156 @@ void forward_usb_feature_report(uint8_t reportId, const uint8_t* payload, size_t
     }
 }
 
-void log_usb_input_controls() {
-    static std::array<uint8_t, 9> lastControls = {};
-    static int logCount = 0;
-    std::array<uint8_t, 9> controls = {};
-    memcpy(controls.data(), interrupt_data + 1, 6);
-    memcpy(controls.data() + 6, interrupt_data + 8, 3);
-    if (logCount < 80 && controls != lastControls) {
-        std::cout << "USB INPUT axes/buttons=";
-        for (uint8_t byte : controls) {
-            printf("%02x ", byte);
-        }
-        std::cout << "status=" << std::hex << static_cast<int>(interrupt_data[54]) << std::dec << std::endl;
-        lastControls = controls;
-        logCount++;
-    }
-}
-
-void log_bt_report_shape(const std::vector<std::uint8_t>& data) {
-    static int logCount = 0;
-    if (logCount >= 80) {
-        return;
-    }
-
-    size_t reportOffset = 0;
-    if (!find_bt_report31(data.data(), data.size(), reportOffset) && !(data.size() == 10 && data[0] == 0x01)) {
-        return;
-    }
-
-    std::cout << "BT REPORT len=" << data.size();
-    if (find_bt_report31(data.data(), data.size(), reportOffset)) {
-        std::cout << " flags=0x" << std::hex << static_cast<int>(data[reportOffset + 1])
-                  << " mic=" << ((data[reportOffset + 1] & 0x02) ? 1 : 0) << " input=" << ((data[reportOffset + 1] & 0x01) ? 1 : 0)
-                  << std::dec;
-    }
-    std::cout << std::endl;
-    logCount++;
-}
-
-void audio_task(const std::stop_token& stop_token) {
+void audioTask(const std::stop_token& stop_token) {
     while (!stop_token.stop_requested()) {
         recorder.runOnce();
     }
     recorder.uninit();
 }
 
-int event_bus() {
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        perror("epoll_create1");
-        return 1;
-    }
-    epoll_event events[3];
+namespace {
+struct EventBusContext {
+    EventLoop* loop = nullptr;
+    int exitCode = 0;
+};
 
-    epoll_event usb_event{};
-    usb_event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-    usb_event.data.fd = usb.get_fd();
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, usb.get_fd(), &usb_event) != 0) {
-        perror("epoll_ctl usb");
-        close(epoll_fd);
-        return 1;
+void requestEventBusExit(EventBusContext* context, int exitCode, const char* message) {
+    if (context->exitCode != 0) {
+        return;
     }
+    context->exitCode = exitCode;
+    if (message != nullptr) {
+        std::cerr << message << std::endl;
+    }
+    context->loop->breakLoop();
+}
 
-    epoll_event bt_event{};
-    bt_event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-    bt_event.data.fd = bt.get_fd();
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bt.get_fd(), &bt_event) != 0) {
-        perror("epoll_ctl bt");
-        close(epoll_fd);
-        return 1;
+void handleUsbReadable(evutil_socket_t, short events, void* arg) {
+    auto* context = static_cast<EventBusContext*>(arg);
+    if ((events & EV_CLOSED) != 0) {
+        requestEventBusExit(context, 4, "USB HID file descriptor reported hangup/error; exiting for service restart");
+        return;
     }
 
-    constexpr auto kUsbSendPeriod = std::chrono::milliseconds(4);
-    auto nextSendTime = std::chrono::steady_clock::now() + kUsbSendPeriod;
-    while (true) {
-        if (!bt.healthy()) {
-            std::cerr << "Bluetooth HID became unhealthy; exiting for service restart" << std::endl;
-            close(epoll_fd);
-            return 2;
-        }
+    std::vector<std::uint8_t> data = usb.recv();
+    if (data.empty()) {
         if (!usb.healthy()) {
-            std::cerr << "USB HID became unhealthy; exiting for service restart" << std::endl;
-            close(epoll_fd);
-            return 3;
+            requestEventBusExit(context, 3, "USB HID became unhealthy; exiting for service restart");
         }
-
-        auto now = std::chrono::steady_clock::now();
-
-        if (now >= nextSendTime) {
-            sync_usb_mic_mute_status();
-            usb.send(interrupt_data, 64);
-            nextSendTime += kUsbSendPeriod;
-        }
-
-        int timeout_ms = std::chrono::duration_cast<std::chrono::milliseconds>(nextSendTime - now).count();
-        if (timeout_ms < 0) {
-            timeout_ms = 0;
-        }
-
-        int num_events = epoll_wait(epoll_fd, events, 3, timeout_ms);
-        if (num_events < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("epoll_wait");
-            close(epoll_fd);
-            return 1;
-        }
-
-        for (int i = 0; i < num_events; i++) {
-            if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-                if (events[i].data.fd == bt.get_fd()) {
-                    std::cerr << "Bluetooth HID file descriptor reported hangup/error; exiting for service restart" << std::endl;
-                    close(epoll_fd);
-                    return 4;
-                }
-                if (events[i].events & EPOLLERR) {
-                    std::cerr << "USB HID file descriptor reported error; exiting for service restart" << std::endl;
-                    close(epoll_fd);
-                    return 4;
-                }
-            }
-
-            if (events[i].data.fd == usb.get_fd()) {
-                // USB SetReport / Interrupt OUT
-                std::vector<std::uint8_t> data = usb.recv();
-                if (data.empty()) {
-                    continue;
-                }
-                // log_usb_raw(data);
-                if (data.size() == 47) {
-                    bt.setStateData(data.data(), data.size());
-
-                    continue;
-                }
-                if (data.size() == 63 && data[0] == 0x06) {
-                    forward_usb_feature_report(0x80, data.data(), data.size());
-                    continue;
-                }
-                if (hid_no_out_endpoint_enabled()) {
-                    if (data.size() == 47) {
-                        bt.setStateData(data.data(), data.size());
-
-                        continue;
-                    }
-                    if (data.size() == 63) {
-                        forward_usb_feature_report(0x80, data.data(), data.size());
-                        continue;
-                    }
-                }
-                if (data[0] == 0x02) {
-                    bt.setStateData(data.data() + 1, data.size() - 1);
-
-                    continue;
-                }
-                if (data[0] == 0x80) {
-                    data.resize(64);
-
-                    forward_usb_feature_report(0x80, data.data() + 1, data.size() - 1);
-                }
-            } else if (events[i].data.fd == bt.get_fd()) {
-                // 接收蓝牙的状态数据
-                std::vector<std::uint8_t> data = bt.recv();
-                if (data.empty()) {
-                    continue;
-                }
-                // log_bt_report_shape(data);
-                if (data.size() < 65) {
-                    continue;
-                }
-                if (!is_full_bt_input_report(data.data(), data.size())) {
-                    continue;
-                }
-                bt.handleMicButton(mic_button_pressed_from_bt_report31(data.data(), data.size()));
-                static std::array<uint8_t, 16> lastBtControls = {};
-                static bool haveLastBtControls = false;
-                std::array<uint8_t, 16> btControls = {};
-                memcpy(btControls.data(), data.data(), btControls.size());
-                if (!haveLastBtControls || btControls != lastBtControls) {
-                    lastBtControls = btControls;
-                    haveLastBtControls = true;
-                }
-                bt.setHeadset(headset_connected_from_status(data[55]));
-                memcpy(interrupt_data + 1, data.data() + 2, 63);
-                sync_usb_mic_mute_status();
-            }
-        }
+        return;
     }
+
+    if (data.size() == 47) {
+        bt.setStateData(data.data(), data.size());
+        return;
+    }
+    if (data.size() == 63 && data[0] == 0x06) {
+        forwardUsbFeatureReport(0x80, data.data(), data.size());
+        return;
+    }
+    if (data[0] == 0x02) {
+        bt.setStateData(data.data() + 1, data.size() - 1);
+        return;
+    }
+    if (data[0] == 0x80) {
+        data.resize(64);
+        forwardUsbFeatureReport(0x80, data.data() + 1, data.size() - 1);
+    }
+}
+
+void handleBtReadable(evutil_socket_t, short events, void* arg) {
+    auto* context = static_cast<EventBusContext*>(arg);
+    if ((events & EV_CLOSED) != 0) {
+        requestEventBusExit(context, 4, "Bluetooth HID file descriptor reported hangup/error; exiting for service restart");
+        return;
+    }
+
+    std::vector<std::uint8_t> data = bt.recv();
+    if (data.empty()) {
+        if (!bt.healthy()) {
+            requestEventBusExit(context, 2, "Bluetooth HID became unhealthy; exiting for service restart");
+        }
+        return;
+    }
+
+    if (data.size() < 65) {
+        return;
+    }
+    if (!is_full_bt_input_report(data.data(), data.size())) {
+        return;
+    }
+    bt.handleMicButton(mic_button_pressed_from_bt_report31(data.data(), data.size()));
+    static std::array<uint8_t, 16> lastBtControls = {};
+    static bool haveLastBtControls = false;
+    std::array<uint8_t, 16> btControls = {};
+    memcpy(btControls.data(), data.data(), btControls.size());
+    if (!haveLastBtControls || btControls != lastBtControls) {
+        lastBtControls = btControls;
+        haveLastBtControls = true;
+    }
+    bt.setHeadset(headset_connected_from_status(data[55]));
+    memcpy(interrupt_data + 1, data.data() + 2, 63);
+}
+
+void handleUsbPeriodic(evutil_socket_t, short events, void* arg) {
+    auto* context = static_cast<EventBusContext*>(arg);
+    if (!bt.healthy()) {
+        requestEventBusExit(context, 2, "Bluetooth HID became unhealthy; exiting for service restart");
+        return;
+    }
+    if (!usb.healthy()) {
+        requestEventBusExit(context, 3, "USB HID became unhealthy; exiting for service restart");
+        return;
+    }
+
+    const ssize_t ret = usb.send(interrupt_data, 64);
+    if (ret < 0 && !usb.healthy()) {
+        requestEventBusExit(context, 3, "USB HID became unhealthy; exiting for service restart");
+    }
+}
+}  // namespace
+
+int event_bus() {
+    EventBusContext context{};
+    EventLoop loop;
+    context.loop = &loop;
+    if (!loop.valid()) {
+        std::cerr << "event_base_new failed" << std::endl;
+        return 1;
+    }
+
+    event* usbEvent = loop.createFdEvent(usb.get_fd(), EV_READ | EV_CLOSED, true, handleUsbReadable, &context);
+    event* btEvent = loop.createFdEvent(bt.get_fd(), EV_READ | EV_CLOSED, true, handleBtReadable, &context);
+    event* timerEvent = loop.createTimerEvent(true, handleUsbPeriodic, &context);
+
+    if (usbEvent == nullptr || btEvent == nullptr || timerEvent == nullptr) {
+        std::cerr << "event_new failed" << std::endl;
+        loop.freeEvent(usbEvent);
+        loop.freeEvent(btEvent);
+        loop.freeEvent(timerEvent);
+        return 1;
+    }
+
+    const timeval usbSendPeriod{.tv_sec = 0, .tv_usec = 4 * 1000};
+    if (!loop.addEvent(usbEvent, nullptr) || !loop.addEvent(btEvent, nullptr) || !loop.addEvent(timerEvent, &usbSendPeriod)) {
+        std::cerr << "event_add failed" << std::endl;
+        loop.freeEvent(usbEvent);
+        loop.freeEvent(btEvent);
+        loop.freeEvent(timerEvent);
+        return 1;
+    }
+
+    const int dispatchResult = loop.dispatch();
+    if (dispatchResult == -1 && context.exitCode == 0) {
+        std::cerr << "event_base_dispatch failed" << std::endl;
+        context.exitCode = 1;
+    }
+
+    loop.freeEvent(usbEvent);
+    loop.freeEvent(btEvent);
+    loop.freeEvent(timerEvent);
+
+    return context.exitCode == 0 ? 0 : context.exitCode;
 }
 
 int main() {
@@ -365,7 +299,7 @@ int main() {
     ret = usb.set_get_report(0x05, report_0x05);
     printHex(report_0x05.data(), report_0x05.size());
 
-    auto thread2 = std::jthread(audio_task);
+    auto thread2 = std::jthread(audioTask);
     return event_bus();
 
     return 0;

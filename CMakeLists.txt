@@ -30,9 +30,15 @@ target_compile_definitions(wdl_resampler PRIVATE WDL_RESAMPLE_TYPE=float)
 set(OPUS_DISABLE_INTRINSICS ON)
 add_subdirectory(libs/opus)
 
+set(EVENT__DISABLE_TESTS ON CACHE BOOL "" FORCE)
+set(EVENT__DISABLE_SAMPLES ON CACHE BOOL "" FORCE)
+set(EVENT__DISABLE_REGRESS ON CACHE BOOL "" FORCE)
+add_subdirectory(libs/libevent)
+
 add_executable(ds5_dongle_linux
         src/USBGadget.cpp
         src/main.cpp
+        src/EventLoop.cpp
         src/DebugHIDInput.cpp
         src/ALSARecord.cpp
         src/USBHID.cpp
@@ -56,6 +62,7 @@ if (STATIC_LINK)
             Threads::Threads
             wdl_resampler
             opus
+            event_core
     )
 else ()
 # Match the Pico speaker path, which builds Opus in its default floating-point mode.
@@ -65,5 +72,6 @@ target_link_libraries(ds5_dongle_linux PRIVATE
         Threads::Threads
         wdl_resampler
         opus
+        event_core
 )
 endif ()

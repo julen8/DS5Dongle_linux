@@ -4,3 +4,4 @@
 /bin/
 /build_arm64/
 compile_commands.json
+.cache
