@@ -15,6 +15,9 @@ PACKAGES=(
     wget
     curl
     libasound2-dev:arm64
+    build-essential
+    libssl-dev:arm64
+    zlib1g-dev:arm64
 )
 MISSING=()
 for pkg in "${PACKAGES[@]}"; do
@@ -41,6 +44,8 @@ fi
 
 PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
   PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-  cmake -B build_arm64 -DCMAKE_BUILD_TYPE=Release .
+  cmake -B build_arm64 -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache  .
 
+
+cmake --build build_arm64 --target clean
 cmake --build build_arm64 -j"$(nproc)"

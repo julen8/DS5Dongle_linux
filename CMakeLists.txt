@@ -8,13 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 SET(EXECUTABLE_OUTPUT_PATH  ${PROJECT_SOURCE_DIR}/bin)
 
-
-option(STATIC_LINK "Prefer static linking where possible" OFF)
-if (STATIC_LINK)
-    include(cmake/AlsaStatic.cmake)
-else ()
-    find_package(ALSA REQUIRED)
-endif ()
+find_package(ALSA REQUIRED)
 find_package(Threads REQUIRED)
 
 # WDL
@@ -54,19 +48,6 @@ target_include_directories(ds5_dongle_linux PRIVATE
 target_compile_options(ds5_dongle_linux PRIVATE -fsigned-char -Wall -Wextra -Wno-unused-parameter)
 target_compile_definitions(ds5_dongle_linux PRIVATE WDL_RESAMPLE_TYPE=float)
 
-if (STATIC_LINK)
-    target_include_directories(ds5_dongle_linux PRIVATE ${ALSA_STATIC_INCLUDE_DIR})
-    target_link_options(ds5_dongle_linux PRIVATE -static)
-    target_link_libraries(ds5_dongle_linux PRIVATE
-            ALSA::asound_static
-            Threads::Threads
-            wdl_resampler
-            opus
-            event_core
-    )
-else ()
-# Match the Pico speaker path, which builds Opus in its default floating-point mode.
-
 target_link_libraries(ds5_dongle_linux PRIVATE
         ALSA::ALSA
         Threads::Threads
@@ -74,4 +55,3 @@ target_link_libraries(ds5_dongle_linux PRIVATE
         opus
         event_core
 )
-endif ()

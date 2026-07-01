@@ -1,0 +1,74 @@
+name: Build ARM64 Binary
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:13
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Enable arm64 architecture
+        run: |
+          set -euo pipefail
+          dpkg --add-architecture arm64
+
+      - name: Update apt package index
+        run: |
+          set -euo pipefail
+          apt-get update
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends \
+            git \
+            cmake \
+            ninja-build \
+            python3 \
+            gcc \
+            g++ \
+            ca-certificates \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            pkg-config \
+            wget \
+            curl \
+            libasound2-dev:arm64 \
+            build-essential \
+            libssl-dev:arm64 \
+            zlib1g-dev:arm64
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        env:
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+          PKG_CONFIG_LIBDIR: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+        run: |
+          set -euo pipefail
+          cmake -B build_arm64 -DCMAKE_BUILD_TYPE=Release -G Ninja .
+
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          cmake --build build_arm64 -j"$(nproc)"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ds5_dongle_linux-arm64
+          path: bin/ds5_dongle_linux
+          if-no-files-found: error
